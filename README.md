@@ -225,7 +225,8 @@ Miss Rate:   12.6 %
 Stability:   91.2 %
 ```
 
-И показывает его в виде таблиц и графиков.
+И показывает его в виде таблиц и сводных результатов; технические графики
+и временные ряды открываются в Grafana.
 
 ------------------------------------------------------------------------
 
@@ -497,8 +498,22 @@ Redis
 
 # 12. PostgreSQL
 
-PostgreSQL нужен не для самого кэширования, а для хранения результатов
-экспериментов.
+PostgreSQL используется не как кэш, а как основная реляционная база данных
+для хранения конфигураций, истории и итоговых результатов экспериментов.
+Само рабочее кэш-хранилище — Redis, а временные ряды технических метрик —
+Prometheus.
+
+PostgreSQL выбран вместо MongoDB не потому, что MongoDB не подходит, а
+потому, что для CacheLab структура данных достаточно стабильна и хорошо
+описывается связанными сущностями: эксперимент, метод, сценарий, набор
+данных, конфигурация и результаты. SQL также удобен для выборки и
+сравнения экспериментов, например для поиска лучшего метода в заданном
+сценарии и при заданной интенсивности нагрузки.
+
+MongoDB можно было бы использовать, если бы результаты экспериментов
+имели сильно различающуюся и постоянно меняющуюся структуру. Для текущей
+задачи преимущества такой гибкости не являются определяющими, поэтому
+основным вариантом остаётся PostgreSQL.
 
 Например:
 
@@ -704,10 +719,13 @@ docker compose up
 
 # 17. Frontend
 
+Frontend является SPA для управления экспериментами. SSR, SEO и серверные возможности Next.js для данного проекта не требуются, поэтому используется React + Vite.
+
 Предлагаемый стек:
 
 ``` text
-Next.js
+React
+Vite
 TypeScript
 Tailwind CSS
 shadcn/ui
@@ -775,9 +793,9 @@ shadcn/ui
 │ Miss Rate      12.6%                     │
 │ Latency        42.3 ms                   │
 │                                          │
-│ [ график latency ]                       │
-│ [ график hit rate ]                      │
-│ [ график нагрузки ]                      │
+│ [ ссылка/переход к Grafana ]             │
+│ [ сводные результаты ]                   │
+│ [ технические метрики ]                  │
 └──────────────────────────────────────────┘
 ```
 
@@ -796,11 +814,9 @@ Miss Rate        28%     25%     16%     12%
 Stability        78%     80%     86%     83%
 ```
 
-И графики:
-
-``` text
-Метод → метрики → визуальное сравнение
-```
+Технические временные графики при этом строятся в Grafana. Frontend отвечает
+за управление экспериментами, таблицы и сводное представление результатов,
+а не за дублирование Grafana отдельной системой графиков.
 
 Именно здесь прикладная система начинает непосредственно поддерживать
 научное исследование.
@@ -857,11 +873,12 @@ Frontend:
 ``` text
 frontend/
 │
-├── app/
-│   ├── dashboard/
-│   ├── experiments/
-│   ├── methods/
-│   └── scenarios/
+├── src/
+│   ├── pages/
+│   │   ├── Dashboard/
+│   │   ├── Experiments/
+│   │   ├── Methods/
+│   │   └── Scenarios/
 │
 ├── components/
 ├── lib/
@@ -919,7 +936,10 @@ PostgreSQL
 Locust
 Prometheus
 Grafana
-Next.js
+React + Vite
+TypeScript
+Tailwind CSS
+shadcn/ui
 ```
 
 Получается:
@@ -949,7 +969,7 @@ Grafana / Frontend
 **Да, если не пытаться сразу сделать полноценную исследовательскую
 платформу уровня production.**
 
-Срок около 4,5 месяцев позволяет сделать MVP и постепенно его расширить.
+Срок около 4,5 месяца позволяет сделать MVP и постепенно его расширить.
 
 Ключевой принцип:
 
@@ -959,7 +979,7 @@ Grafana / Frontend
 Неправильный порядок:
 
 ``` text
-Сначала Next.js
+Сначала алгоритмы
 ↓
 потом дизайн
 ↓
@@ -1031,9 +1051,10 @@ Locust
 ## Приоритет 4 --- желательно
 
 ``` text
-Next.js
+React
+Vite
 TypeScript
-Tailwind
+Tailwind CSS
 shadcn/ui
 ```
 
@@ -1082,9 +1103,8 @@ PostgreSQL
 Docker
 ```
 
-Frontend можно сделать позже.
-
-Такой проект уже позволяет провести исследование.
+Такой проект уже позволяет провести исследование. Frontend добавляется
+после стабилизации экспериментального ядра.
 
 ------------------------------------------------------------------------
 
@@ -1093,7 +1113,7 @@ Frontend можно сделать позже.
 Если времени хватает:
 
 ``` text
-Next.js + TypeScript
+React + Vite + TypeScript
         ↓
       FastAPI
         ↓
@@ -1184,7 +1204,7 @@ PostgreSQL Prometheus
 Нельзя делать:
 
 ``` text
-React/Next.js
+React
    ↓
 логика алгоритма
 ```
@@ -1219,24 +1239,24 @@ Frontend --- только удобный способ управления си�
 
 ## Основной
 
-  Уровень             Технология
+Уровень             Технология
   ------------------- --------------------------
-  Backend             Python
-  API                 FastAPI
-  ML                  scikit-learn
-  Deep Learning       PyTorch
-  Data Science        NumPy + Pandas
-  Cache               Redis
-  Database            PostgreSQL
-  Load testing        Locust
-  Metrics             Prometheus
-  Monitoring          Grafana
-  Frontend            Next.js
-  Frontend language   TypeScript
-  UI                  Tailwind CSS + shadcn/ui
-  Containerization    Docker + Docker Compose
-  Testing             pytest
-  Version control     Git + GitHub
+Backend             Python
+API                 FastAPI
+ML                  scikit-learn
+Deep Learning       PyTorch
+Data Science        NumPy + Pandas
+Cache               Redis
+Database            PostgreSQL
+Load testing        Locust
+Metrics             Prometheus
+Monitoring          Grafana
+Frontend            React + Vite
+Frontend language   TypeScript
+UI                  Tailwind CSS + shadcn/ui
+Containerization    Docker + Docker Compose
+Testing             pytest
+Version control     Git + GitHub
 
 ------------------------------------------------------------------------
 
