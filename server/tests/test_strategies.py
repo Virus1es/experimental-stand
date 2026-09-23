@@ -1,0 +1,63 @@
+from app.strategies.fifo import FIFOStrategy
+from app.strategies.lfu import LFUStrategy
+from app.strategies.lru import LRUStrategy
+
+def test_lru_eviction():
+    cache = LRUStrategy(capacity=2)
+
+    cache.put("A", "1")
+    cache.put("B", "2")
+
+    assert cache.get("A") == "1"
+
+    cache.put("C", "3")
+
+    assert cache.get("B") is None
+    assert cache.get("A") == "1"
+    assert cache.get("C") == "3"
+
+
+def test_lfu_eviction():
+    cache = LFUStrategy(capacity=2)
+
+    cache.put("A", "1")
+    cache.put("B", "2")
+
+    cache.get("A")
+    cache.get("A")
+
+    cache.put("C", "3")
+
+    assert cache.get("B") is None
+    assert cache.get("A") == "1"
+    assert cache.get("C") == "3"
+
+def test_fifo_eviction():
+    cache = FIFOStrategy(capacity=2)
+
+    cache.put("A", "1")
+    cache.put("B", "2")
+
+    cache.get("A")
+
+    cache.put("C", "3")
+
+    assert cache.get("A") is None
+    assert cache.get("B") == "2"
+    assert cache.get("C") == "3"
+
+def test_hit_rate():
+    cache = LRUStrategy(capacity=2)
+    
+    cache.put("A", "1")
+
+    cache.get("A")
+    cache.get("B")
+
+    metrics = cache.get_metrics()
+
+    assert metrics.hits == 1
+    assert metrics.misses == 1
+    assert metrics.hit_rate == 0.5
+    assert metrics.miss_rate == 0.5
+    
