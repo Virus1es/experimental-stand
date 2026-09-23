@@ -1,3 +1,4 @@
+from app.strategies.factory import create_strategy
 from app.strategies.fifo import FIFOStrategy
 from app.strategies.lfu import LFUStrategy
 from app.strategies.lru import LRUStrategy
@@ -60,4 +61,32 @@ def test_hit_rate():
     assert metrics.misses == 1
     assert metrics.hit_rate == 0.5
     assert metrics.miss_rate == 0.5
+
+def test_strategy_factory():
+    assert isinstance(
+        create_strategy("lru", 10),
+        LRUStrategy,
+    )
     
+    assert isinstance(
+        create_strategy("lfu", 10),
+        LFUStrategy,
+    )
+    
+    assert isinstance(
+        create_strategy("fifo", 10),
+        FIFOStrategy,
+    )
+
+def test_strategy_factory_is_case_insensitive():
+    assert isinstance(
+        create_strategy("LRU", 10),
+        LRUStrategy,
+    )
+
+def test_strategy_factory_reject_unknown_strategy():
+    try:
+        create_strategy("unkmown", 10)
+        assert False
+    except ValueError:
+        pass
