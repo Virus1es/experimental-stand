@@ -33,6 +33,10 @@ class CacheStrategy(ABC):
     @abstractmethod
     def get(self, key: str) -> str | None:
         """Get value from cache."""
+    
+    @abstractmethod
+    def put(self, key: str, value: str) -> None:
+        """Put value into cache."""
 
     @abstractmethod
     def remove(self, key: str) -> None:

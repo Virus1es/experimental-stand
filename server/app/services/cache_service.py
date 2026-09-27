@@ -19,7 +19,7 @@ class CacheService:
         self._strategy.clear()
     
     def get_metrics(self):
-        self._strategy.get_metrics()
+        return self._strategy.get_metrics()
     
     def size(self) -> int:
         return len(self._strategy)
