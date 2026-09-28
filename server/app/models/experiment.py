@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -18,7 +18,20 @@ class ExperimentConfig:
             raise ValueError("Hit latency cannot be negative")
         if self.miss_latency_ms < 0:
             raise ValueError("Miss latency cannot be negative")
+
+@dataclass(frozen=True)
+class RequestResult:
+    timestamp_ms: int
+    resource_id: str
+    size_bytes: int
     
+    cache_hit: bool
+    latency_ms: float
+    
+    origin_request: bool
+    origin_bytes: int
+    
+    cache_size: int  
 
 @dataclass(frozen=True)
 class ExperimentResult:
@@ -34,3 +47,9 @@ class ExperimentResult:
     
     total_latency_ms: float
     average_latency_ms: float
+    
+    origin_requests: int = 0
+    client_bytes: int = 0
+    origin_bytes: int = 0
+    
+    requests: list[RequestResult] = field(default_factory=list)
