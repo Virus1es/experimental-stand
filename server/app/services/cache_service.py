@@ -23,3 +23,6 @@ class CacheService:
     
     def size(self) -> int:
         return len(self._strategy)
+    
+    def contains(self, key: str) -> bool:
+        return self._strategy.contains(key)

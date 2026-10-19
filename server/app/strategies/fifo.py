@@ -33,6 +33,9 @@ class FIFOStrategy(CacheStrategy):
 
     def clear(self) -> None:
         self._cache.clear()
+        
+    def contains(self, key: str) -> bool:
+        return key in self._cache
 
     def __len__(self) -> int:
         return len(self._cache)

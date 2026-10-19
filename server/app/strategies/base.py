@@ -45,6 +45,10 @@ class CacheStrategy(ABC):
     @abstractmethod
     def clear(self) -> None:
         """Clear cache."""
+        
+    @abstractmethod
+    def contains(self, key: str) -> bool:
+        """Проверяет наличие ресурса без измененения статистики."""
 
     @abstractmethod
     def __len__(self) -> int:
