@@ -218,6 +218,20 @@ class PrefetchExperimentRunner:
             prefetch_origin_bytes=prefetch_origin_bytes
         )
         
+        accounted_prefetches = (
+            prefetch_hits
+            + prefetch_wasted_evictions
+            + len(pending_prefetches)
+        )
+        
+        if accounted_prefetches != prefetch_count:
+            print(
+                "WARNING: Prefetch accounting mismatch: "
+                f"loaded={prefetch_count}, "
+                f"accounted={accounted_prefetches}, "
+                f"difference={prefetch_count - accounted_prefetches}"
+            )
+        
         return PrefetchExpermintResult(
             experiment=experiment_result,
             prefetch=prefetch_metrics,

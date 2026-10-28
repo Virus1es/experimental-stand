@@ -14,7 +14,7 @@ def main() -> None:
     
     config = ExperimentConfig(
         strategy="lru",
-        capacity=5,
+        capacity=20,
         hit_latency_ms=2.0,
         miss_latency_ms=100.0,
     )
@@ -34,7 +34,7 @@ def main() -> None:
         test_trace=test_trace,
         config=config,
         predictor=predictor,
-        probability_threshold=0.05,
+        probability_threshold=0.2,
         max_prefetch=3,
     )
     
