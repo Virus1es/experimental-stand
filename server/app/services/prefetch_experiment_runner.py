@@ -14,6 +14,8 @@ from app.models.prefetch_experiment import (
 )
 from app.services.cache_service import CacheService
 from app.services.prefetch_service import PrefetchService
+from app.services.prefetch_result_validator import validate_prefetch_result
+
 
 class NextResourcePredictor(Protocol):
     """Интерфейс модели для нового экспериментального runner."""
@@ -110,6 +112,11 @@ class PrefetchExperimentRunner:
             prefetch_wasted_evictions += len(evicted)
             pending_prefetches.difference_update(evicted)
         
+        def account_loaded_prefetch(resource_id: str) -> None:
+            """Учитывает новую предзагрузку и вызванные ею вытеснения."""
+            pending_prefetches.add(resource_id)
+            account_evictions()
+        
         for access in test_trace:
             resource_id = access.resource_id
             known_sizes[resource_id] = access.size_bytes
@@ -173,13 +180,10 @@ class PrefetchExperimentRunner:
                 if prediction.resource_id in known_sizes
             ]
             
-            loaded = prefetch_service.prefetch(
-                available_predictions
+            prefetch_service.prefetch(
+                available_predictions,
+                on_resource_loaded=account_loaded_prefetch
             )
-            
-            account_evictions()
-            
-            pending_prefetches.update(loaded)
             
         metrics = cache.get_metrics()
         total_requests = metrics.total_requests
@@ -218,21 +222,11 @@ class PrefetchExperimentRunner:
             prefetch_origin_bytes=prefetch_origin_bytes
         )
         
-        accounted_prefetches = (
-            prefetch_hits
-            + prefetch_wasted_evictions
-            + len(pending_prefetches)
-        )
-        
-        if accounted_prefetches != prefetch_count:
-            print(
-                "WARNING: Prefetch accounting mismatch: "
-                f"loaded={prefetch_count}, "
-                f"accounted={accounted_prefetches}, "
-                f"difference={prefetch_count - accounted_prefetches}"
-            )
-        
-        return PrefetchExpermintResult(
+        result = PrefetchExpermintResult(
             experiment=experiment_result,
             prefetch=prefetch_metrics,
         )
+        
+        validate_prefetch_result(result, test_trace)
+        
+        return result

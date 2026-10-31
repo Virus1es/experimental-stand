@@ -22,11 +22,16 @@ class PrefetchService:
         self._threshold = probability_threshold
         self._max_prefetch = max_prefetch
         
-    def prefetch(self, predictions: Sequence[ResourcePrediction]) -> list[str]:
+    def prefetch(
+        self, 
+        predictions: Sequence[ResourcePrediction],
+        on_resource_loaded: Callable[[str], None] | None = None
+    ) -> list[str]:
         """Предварительно загружает выбранные ресурсы."""
         
         loaded: list[str] = []
         seen: set[str] = set()
+        
         for prediction in predictions:
             if len(loaded) >= self._max_prefetch:
                 break
@@ -52,5 +57,8 @@ class PrefetchService:
             )
             
             loaded.append(resource_id)
+            
+            if on_resource_loaded is not None:
+                on_resource_loaded(resource_id)
         
         return loaded
