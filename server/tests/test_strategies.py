@@ -90,3 +90,46 @@ def test_strategy_factory_reject_unknown_strategy():
         assert False
     except ValueError:
         pass
+    
+def test_lru_byte_capacity_eviction():
+    cache = LRUStrategy(capacity=10, size_of=int)
+
+    cache.put("A", "4")
+    cache.put("B", "4")
+
+    cache.get("A")
+
+    evicted = cache.put_with_evictions("C", "4")
+
+    assert evicted == ["B"]
+    assert cache.contains("A")
+    assert cache.contains("C")
+    assert not cache.contains("B")
+    assert cache.used_capacity == 8
+    
+
+def test_lru_byte_capacity_update():
+    cache = LRUStrategy(capacity=10, size_of=int)
+
+    cache.put("A", "4")
+    cache.put("B", "4")
+
+    evicted = cache.put_with_evictions("A", "8")
+
+    assert evicted == ["B"]
+    assert cache.contains("A")
+    assert not cache.contains("B")
+    assert cache.used_capacity == 8
+
+
+def test_lru_rejects_oversized_object():
+    cache = LRUStrategy(capacity=10, size_of=int)
+
+    cache.put("A", "4")
+
+    evicted = cache.put_with_evictions("B", "20")
+
+    assert evicted == []
+    assert cache.contains("A")
+    assert not cache.contains("B")
+    assert cache.used_capacity == 4
