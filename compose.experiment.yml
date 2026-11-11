@@ -1,0 +1,57 @@
+name: cache-lab-experiment
+
+services:
+  redis:
+    image: redis:8.6.3
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    cpus: 1.0
+    mem_limit: 512m
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    
+    environment:
+      REDIS_URL: redis://redis:6379/0
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    
+    depends_on:
+      redis:
+        condition: service_healthy
+    
+    cpus: 2.0
+    mem_limit: 1g
+
+  origin:
+    build: 
+      context: ./origin
+      dockerfile: Dockerfile
+
+    environment:
+      ORIGIN_DELAY_MS: "50"
+    
+    ports:
+      - "127.0.0.1:8001:8001"
+    
+    cpus: 1.0
+    mem_limit: 512m
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 10
