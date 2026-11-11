@@ -3,18 +3,25 @@ import httpx
 
 from fastapi import APIRouter, HTTPException, Path, Request
 
+from app.services.http_cache_controller import HttpCacheController
+
 router = APIRouter(prefix="/api/resources", tags=["Resources"])
 
-ORIGIN_URL = os.getenv("ORIGIN_URL", "http://origin:8001").rstrip("/")
+@router.get("/stats")
+async def get_cache_stats(request: Request) -> dict[str, int]:
+    controller: HttpCacheController = request.app.state.cache_controller
+    
+    return {
+        "hits": controller.hits,
+        "misses": controller.misses,
+        "origin_requests": controller.origin_requests
+    }
 
 @router.get("/{resource_id}")
 async def get_resource(request: Request, resource_id: int = Path(gt=0)) -> dict[str, int | str]:
-    client: httpx.AsyncClient = request.app.state.origin_client
+    controller: HttpCacheController = request.app.state.cache_controller
     
     try:
-        response = await client.get(f"{ORIGIN_URL}/resources/{resource_id}")
-        response.raise_for_status()
-        
-        return response.json()
+        return await controller.get_resource(resource_id)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="Origin service unavailable") from exc
