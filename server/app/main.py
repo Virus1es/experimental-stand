@@ -14,7 +14,7 @@ from app.services.redis_cache_storage import RedisCacheStorage
 async def lifespan(app: FastAPI):
     redis_client = Redis.from_url(
         os.getenv("REDIS_URL", "redis://redis:6379/0"),
-        decode_respones=False
+        decode_responses=False
     )
     
     try:

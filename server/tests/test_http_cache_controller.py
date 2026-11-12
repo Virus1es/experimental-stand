@@ -181,3 +181,138 @@ def test_concurrent_requests_load_resource_once():
             assert "resource:42" in redis.data
 
     asyncio.run(scenario())
+
+def test_prefetch_resource_then_client_hit():
+    async def scenario():
+        redis = FakeRedis()
+        origin_calls: list[int] = []
+
+        async def handler(
+            request: httpx.Request,
+        ) -> httpx.Response:
+            resource_id = int(
+                request.url.path.split("/")[-1]
+            )
+
+            origin_calls.append(resource_id)
+
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "resource_id": resource_id,
+                    "payload": "x" * 20,
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as origin:
+            controller = HttpCacheController(
+                redis_client=redis,
+                origin_client=origin,
+                capacity_bytes=1000,
+                origin_url="http://origin:8001",
+            )
+
+            # Шаг 1. Загружаем ресурс заранее.
+            loaded = await controller.prefetch_resource(42)
+
+            assert loaded is True
+            assert controller.prefetch_requests == 1
+
+            # Предзагрузка не считается пользовательским запросом.
+            assert controller.hits == 0
+            assert controller.misses == 0
+
+            # Шаг 2. Пользователь запрашивает ресурс.
+            result = await controller.get_resource(42)
+
+            assert result["resource_id"] == 42
+
+            # Ответ получен из кэша.
+            assert controller.hits == 1
+            assert controller.misses == 0
+            assert controller.prefetch_hits == 1
+
+            # Источник был вызван только один раз.
+            assert controller.origin_requests == 1
+            assert origin_calls == [42]
+
+            # Шаг 3. Повторный запрос.
+            await controller.get_resource(42)
+
+            assert controller.hits == 2
+
+            # Один объект не должен давать два prefetch hit.
+            assert controller.prefetch_hits == 1
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_prefetch_loads_resource_once():
+    async def scenario():
+        redis = FakeRedis()
+        origin_calls: list[int] = []
+
+        async def handler(
+            request: httpx.Request,
+        ) -> httpx.Response:
+            resource_id = int(
+                request.url.path.split("/")[-1]
+            )
+
+            origin_calls.append(resource_id)
+
+            # Имитируем задержку HTTP-источника.
+            await asyncio.sleep(0.05)
+
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "resource_id": resource_id,
+                    "payload": "x" * 20,
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as origin:
+            controller = HttpCacheController(
+                redis_client=redis,
+                origin_client=origin,
+                capacity_bytes=1000,
+                origin_url="http://origin:8001",
+            )
+
+            results = await asyncio.gather(
+                *(
+                    controller.prefetch_resource(42)
+                    for _ in range(5)
+                )
+            )
+
+            # Только одна предзагрузка должна
+            # действительно сохранить объект.
+            assert results.count(True) == 1
+            assert results.count(False) == 4
+
+            # Остальные запросы не обращаются к источнику.
+            assert origin_calls == [42]
+
+            assert controller.prefetch_requests == 1
+            assert controller.prefetch_skipped == 4
+            assert controller.origin_requests == 1
+
+            # Предзагрузка не влияет на пользовательские
+            # попадания и промахи.
+            assert controller.hits == 0
+            assert controller.misses == 0
+
+            # Первый пользовательский запрос получает
+            # уже предзагруженный ресурс.
+            await controller.get_resource(42)
+
+            assert controller.hits == 1
+            assert controller.prefetch_hits == 1
+
+    asyncio.run(scenario())
