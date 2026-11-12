@@ -9,6 +9,9 @@ from app.api.routes.health import router as health_router
 from app.api.routes.resources import router as resources_router
 from app.services.http_cache_controller import HttpCacheController
 from app.services.redis_cache_storage import RedisCacheStorage
+from app.services.http_prefetch_coordinator import HttpPrefetchCoordinator
+from app.services.http_prefetch_executor import HttpPrefetchExecutor
+from app.services.resource_path_mapper import PathMappedPredictor, ResourcePathMapper
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,7 +36,76 @@ async def lifespan(app: FastAPI):
                 )
             )
             
-            yield
+            app.state.prefetch_executor = None
+            app.state.resource_mapper = None
+            
+            prefetch_enabled = (
+                os.getenv("PREFETCH_ENABLED", "false").lower()
+                in {"true", "1", "yes"}
+            )
+            
+            executor = None
+            
+            if prefetch_enabled:
+                from app.services.predictor import LogisticRegressionPredictor
+                from app.services.trace_service import TraceService
+                
+                trace = TraceService.load_csv(
+                    os.getenv(
+                        "PREFETCH_TRAIN_TRACE",
+                        "data/traces/web_workload.csv",
+                    )
+                )
+                
+                split_index = int(len(trace) * 0.8)
+                train_trace = trace[:split_index]
+                
+                predictor = LogisticRegressionPredictor(
+                    history_size=3,
+                    random_state=42,
+                )
+                predictor.fit(train_trace)
+                
+                mapper = ResourcePathMapper(
+                    access.resource_id
+                    for access in train_trace
+                )
+                
+                initial_history = [
+                    mapper.http_path(access.resource_id)
+                    for access in train_trace[-predictor.history_size:]
+                ]
+                
+                mapped_predictor = PathMappedPredictor(
+                    predictor=predictor,
+                    mapper=mapper
+                )
+                
+                coordinator = HttpPrefetchCoordinator(
+                    predictor=mapped_predictor,
+                    history_size=predictor.history_size,
+                    initial_history=initial_history,
+                    probability_threshold=0.2,
+                    max_prefetch=3,
+                )
+                
+                executor = HttpPrefetchExecutor(
+                    coordinator=coordinator,
+                    cache=app.state.cache_controller,
+                    max_queue_size=256,
+                    prefetch_workers=2,
+                )
+                
+                executor.start()
+                
+                app.state.prefetch_executor = executor
+                app.state.resource_mapper = mapper
+            
+            try:
+                yield
+            finally:
+                if executor is not None:
+                    await executor.stop()
     finally:
         await redis_client.aclose()
     
