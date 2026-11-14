@@ -69,6 +69,13 @@ def test_prefetch_executor_runs_in_background():
 
         # Только теперь разрешаем завершить загрузку.
         cache.release.set()
+        
+        await asyncio.wait_for(
+            executor.wait_idle(),
+            timeout=2,
+        )
+
+        assert cache.loaded == [42]
 
         await asyncio.wait_for(
             executor.stop(),

@@ -46,6 +46,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       ORIGIN_URL: http://origin:8001
       PREFETCH_ENABLED: ${PREFETCH_ENABLED:-false}
+      EXPERIMENT_CONTROL_ENABLED: ${EXPERIMENT_CONTROL_ENABLED:-false}
       PREFETCH_TRAIN_TRACE: data/traces/web_workload.csv
 
     ports:

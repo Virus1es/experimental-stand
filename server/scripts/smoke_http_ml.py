@@ -89,7 +89,16 @@ def main() -> None:
             
             sent_requests += 1
         
-        time.sleep(1)
+        idle_response = client.post(
+            "api/experiment/wait-idle",
+            timeout=25.0
+        )
+        
+        idle_response.raise_for_status()
+        
+        idle_result = idle_response.json()
+        
+        assert idle_result["status"] == "idle"
         
         after = client.get("/api/resources/stats").json()
         

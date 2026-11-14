@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.api.routes.health import router as health_router
 from app.api.routes.resources import router as resources_router
+from app.api.routes.experiment import router as experiment_router
 from app.services.http_cache_controller import HttpCacheController
 from app.services.redis_cache_storage import RedisCacheStorage
 from app.services.http_prefetch_coordinator import HttpPrefetchCoordinator
@@ -116,6 +117,17 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan
 )
+
+experiment_control_enabled = (
+    os.getenv(
+        "EXPERIMENT_CONTROL_ENABLED",
+        "false"
+    ).lower()
+    in {"true", "1", "yes"}
+)
+
+if experiment_control_enabled:
+    app.include_router(experiment_router)
 
 app.include_router(health_router)
 app.include_router(resources_router)

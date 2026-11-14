@@ -115,8 +115,7 @@ class HttpPrefetchExecutor:
         
         self._running = False
         
-        await self._requests.join()
-        await self._candidates.join()
+        await self.wait_idle()
         
         for task in self._tasks:
             task.cancel()
@@ -124,3 +123,9 @@ class HttpPrefetchExecutor:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         
         self._tasks.clear()
+    
+    async def wait_idle(self) -> None:
+        """Ожидает обработки всех принятых заданий"""
+        
+        await self._requests.join()
+        await self._candidates.join()
