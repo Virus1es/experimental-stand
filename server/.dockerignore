@@ -2,3 +2,4 @@ venv/
 .env
 .git
 .pytest_cache/
+results/
