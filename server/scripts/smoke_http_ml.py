@@ -3,6 +3,7 @@ import csv
 import math
 import time
 import httpx
+import json
 
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +58,23 @@ def main() -> None:
         timeout=10.0,
         trust_env=False,
     ) as client:
+        expected_ml = args.mode == "lru-ml"
+        
+        mode_response = client.post(
+            "/api/experiment/wait-idle",
+            timeout=25.0
+        )
+        
+        mode_response.raise_for_status()
+        
+        actual_ml = mode_response.json()["prefetch_enabled"]
+        
+        if actual_ml != expected_ml:
+            raise RuntimeError(
+                f"Mode mismatch expected ML={expected_ml}, ",
+                f"but backend ML={actual_ml}"
+            )
+        
         before = client.get("/api/resources/stats").json()
         
         print("Statistics before: ", before)
@@ -100,6 +118,8 @@ def main() -> None:
         
         assert idle_result["status"] == "idle"
         
+        print("Executor status: ", idle_result)
+        
         after = client.get("/api/resources/stats").json()
         
         print("\n=== HTTP ML SMOKE TEST ===")
@@ -139,6 +159,45 @@ def main() -> None:
         writer.writerows(request_records)
     
     print(f"\nRaw results saved to: {output_path}")
+    
+    metrics_delta = {
+        name: after[name] - before.get(name, 0)
+        for name in after
+    }
+    
+    latency_stats = {
+        "average": mean(latencies_ms),
+        "p50": percentile(latencies_ms, 0.50),
+        "p95": percentile(latencies_ms, 0.95),
+        "p99": percentile(latencies_ms, 0.99),
+    }
+    
+    summary = {
+        "mode": args.mode,
+        "sent_requests": sent_requests,
+        "skipped_requests": skipped_requests,
+        "hit_rate": (
+            metrics_delta["hits"] / sent_requests
+            if sent_requests > 0 else 0.0
+        ),
+        "metrics": metrics_delta,
+        "latency_ms": latency_stats,
+        "percentile_method": "nearest_rank",
+        "raw_csv": str(output_path.resolve()),
+    }
+    
+    summary_path = output_path.with_suffix(".json")
+    
+    summary_path.write_text(
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    
+    print(f"Summary saved to: {summary_path}")
 
 if __name__ == "__main__":
     main()
