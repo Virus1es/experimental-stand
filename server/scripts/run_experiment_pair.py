@@ -4,9 +4,11 @@ import subprocess
 import sys
 import time
 import httpx
+import argparse
 
 from datetime import datetime
 from pathlib import Path
+from statistics import mean
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = SERVER_DIR.parent
@@ -179,6 +181,20 @@ def execute_workload(mode: str, output_dir: Path) -> dict:
     }
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Number of paired experiment runs"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.repeats <= 0:
+        parser.error("--repeats must be positive")
+    
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     output_dir = SERVER_DIR / "results" / "pairs" / run_id
@@ -187,19 +203,85 @@ def main() -> None:
     manifest = {
         "run_id": run_id,
         "experiment_type": "sequential_http_smoke",
-        "run_order": ["lru", "lru-ml"],
-        "runs": [],
+        "requested_repeats": args.repeats,
+        "pairs": [],
     }
     
     try:
-        for mode in ("lru", "lru-ml"):
-            print(f"\n=== Preparing {mode} ===")
+        for pair_index in range(1, args.repeats + 1):
+            if pair_index % 2 == 1:
+                order = ("lru", "lru-ml")
+            else:
+                order = ("lru-ml", "lru")
             
-            prepare_backend(mode)
+            pair_dir = output_dir / f"pair_{pair_index:02d}"
+            pair_dir.mkdir()
             
-            result = execute_workload(mode, output_dir)
+            pair = {
+                "pair_index": pair_index,
+                "run_order": list(order),
+                "runs": [],
+            }
             
-            manifest["runs"].append(result)
+            manifest["pairs"].append(pair)
+            
+            print(f"\n === Pair {pair_index}/{args.repeats} ===", flush=True)
+            
+            for mode in order:
+                print(f"=== Preparing {mode} ===", flush=True)
+
+                prepare_backend(mode)
+                
+                result = execute_workload(mode, pair_dir)
+                
+                pair["runs"].append(result)
+            
+            by_mode = {
+                run["mode"]: run["results"]
+                for run in pair["runs"]
+            }
+            
+            lru = by_mode["lru"]
+            ml = by_mode["lru-ml"]
+            
+            lru_p95 = lru["latency_ms"]["p95"]
+            ml_p95 = ml["latency_ms"]["p95"]
+            
+            reduction_pct = (lru_p95 - ml_p95) / lru_p95 * 100
+            
+            hit_rate_change_pp = (ml["hit_rate"] - lru["hit_rate"]) * 100
+            
+            pair["comparison"] = {
+                "lru_p95_ms": lru_p95,
+                "ml_p95_ms": ml_p95,
+                "p95_reduction_pct": reduction_pct,
+                "hit_rate_change_pp": hit_rate_change_pp,
+                "origin_requests_delta": ml["metrics"]["origin_requests"] - lru["metrics"]["origin_requests"]
+            }
+            
+            print(
+                f"\nPair {pair_index}: "
+                f"p95 reduction = {reduction_pct:+.2f}%",
+                flush=True
+            )
+        
+        reductions = [
+            pair["comparison"]["p95_reduction_pct"]
+            for pair in manifest["pairs"]
+            if "comparison" in pair
+        ]
+        
+        manifest["summary"] = {
+            "completed_pairs": len(reductions),
+            "p95_reductions_pct": reductions,
+            "mean_p95_reduction_pct": mean(reductions),
+            "pairs_with_improvement": sum(value > 0 for value in reductions)
+        }
+        
+        print("\n=== Overall Summary ===")
+        print(f"Completed pairs: {len(reductions)}")
+        print(f"Mean p95 reduction: {mean(reductions):+.2f}%")
+    
     finally:
         manifest_path = output_dir / "manifest.json"
         
@@ -207,12 +289,12 @@ def main() -> None:
             json.dumps(
                 manifest,
                 indent=2,
-                ensure_ascii=False,
+                ensure_ascii=False
             ),
             encoding="utf-8"
         )
         
-        print(f"\nManifest: {manifest_path}")
-        
+        print(f"\nManifest: {manifest_path}", flush=True)
+
 if __name__ == "__main__":
     main()
