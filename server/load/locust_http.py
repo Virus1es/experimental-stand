@@ -1,6 +1,10 @@
+import json
+import os
+
 from itertools import cycle
 from pathlib import Path
-from locust import HttpUser, constant_pacing, task
+from locust import HttpUser, constant_pacing, task, events
+from locust.env import Environment
 
 from app.services.resource_path_mapper import ResourcePathMapper
 from app.services.trace_service import TraceService
@@ -55,4 +59,46 @@ class CacheLabUser(HttpUser):
             
             if result.get("resource_id") != resource_id:
                 response.failure("Incorrect resource returned")
+    
+@events.quitting.add_listener
+def save_final_statistics(environment: Environment, **_kwargs: object):
+    """Сохраняет статистику после завершения Locust."""
+    
+    output_path = os.getenv("CACHELAB_LOCUST_FINAL_STATS")
+    
+    if not output_path:
+        return
+    
+    stats = environment.stats.total
+    
+    if stats.num_requests > 0:
+        latency = {
+            "average": stats.avg_response_time,
+            "p50": stats.get_response_time_percentile(0.50),
+            "p95": stats.get_response_time_percentile(0.95),
+            "p99": stats.get_response_time_percentile(0.99),
+        }
+    else:
+        latency = {
+            "average": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+        }
+        
+    result = {
+        "request_count": stats.num_requests,
+        "failure_count": stats.num_failures,
+        "rps": stats.total_rps or 0.0,
+        "latency_ms": latency
+    }
+    
+    Path(output_path).write_text(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
             
