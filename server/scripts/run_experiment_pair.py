@@ -216,12 +216,76 @@ def read_locust_stats(csv_path: Path) -> dict:
             "p99": float(aggregated["99%"])
         },
     }
+
+def run_locust_warmup(
+    mode: str,
+    output_dir: Path,
+    users: int,
+    duration: int,
+) -> dict:
+    """Запускает прогрев без включения его в измерение."""
     
+    log_path = output_dir / f"{mode}_warmup.log"
+    stats_path = output_dir / f"{mode}_warmup_final.json"
+    
+    environment = os.environ.copy()
+    environment["NO_PROXY"] = "127.0.0.1,localhost"
+    environment["no_proxy"] = "127.0.0.1,localhost"
+    environment["CACHELAB_LOCUST_FINAL_STATS"] = str(stats_path.resolve())
+    
+    command = [
+        sys.executable,
+        "-m", "locust",
+        "-f", "load/locust_http.py",
+        "--headless",
+        "--only-summary",
+        "--host", BASE_URL,
+        "--users", str(users),
+        "--spawn-rate", str(users),
+        "--run-time", f"{duration}s",
+        "--stop-timeout", "10s",
+        "--exit-code-on-error", "2"
+    ]
+    
+    print(
+        f"Warmup: {mode}, {duration}s",
+        flush=True
+    )
+    
+    result = subprocess.run(
+        command,
+        cwd=SERVER_DIR,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace"
+    )
+    
+    log_path.write_text(
+        result.stdout + "\n" + result.stderr,
+        encoding="utf-8"
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Warmup failed: {log_path}")
+    
+    if not stats_path.is_file():
+        raise RuntimeError("Warmup final statistics are missing")
+    
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    
+    if stats["request_count"] == 0 or stats["failure_count"] != 0:
+        raise RuntimeError(f"Invalid wamup statistics: {stats}")
+    
+    return stats
+ 
 def execute_locust_workload(
     mode: str,
     output_dir: Path,
     users: int,
     duration: int,
+    warmup: int = 0,
 ) -> dict:
     """Запускает Locust и собирает метрики backend."""
     
@@ -245,6 +309,32 @@ def execute_locust_workload(
         
         if any(value != 0 for value in before.values()):
             raise RuntimeError(f"Non-zero initial counters: {before}")
+        
+        warmup_stats = None
+        
+        if warmup > 0:
+            warmup_stats = run_locust_warmup(
+                mode=mode,
+                output_dir=output_dir,
+                users=users,
+                duration=warmup
+            )
+
+            idle_response = client.post("/api/experiment/wait-idle")
+            idle_response.raise_for_status()
+            
+            idle_result = idle_response.json()
+            
+            if idle_result["status"] != "idle" or idle_result["prefetch_enabled"] != expected_ml:
+                raise RuntimeError("Invalid backend state after warmup")
+            
+            response = client.get("/api/resources/stats")
+            response.raise_for_status()
+            before = response.json()
+            
+            if before["hits"] + before["misses"] != warmup_stats["request_count"]:
+                raise RuntimeError("Warmup request counters do not match")
+            
         
         print(
             f"Starting Locust: {mode}, "
@@ -370,6 +460,9 @@ def execute_locust_workload(
             "percentile_method": "locust_approximate",
             "locust_stats_csv": str(csv_path.resolve()),
             "final_stats_json": str(final_stats_path.resolve()),
+            "warmup_seconds": warmup,
+            "warmup_stats": warmup_stats,
+            "counters_at_measurement_start": before if warmup > 0 else None
         }
         
         summary_path.write_text(
@@ -398,6 +491,216 @@ def execute_locust_workload(
             "results": summary,
             "exit_code": result.returncode,
         }
+
+def execute_locust_continuous(
+    mode: str,
+    output_dir: Path,
+    users: int,
+    duration: int,
+    warmup: int,
+) -> dict:
+    """Проводит прогрев и измерение в одном процессе Locust."""
+    
+    expected_ml = mode == "locust"
+    
+    phase_path = output_dir / f"{mode}_phases.json"
+    final_path = output_dir / f"{mode}_locust_final.json"
+    summary_path = output_dir / f"{mode}_summary.json"
+    log_path = output_dir / f"{mode}.log"
+    csv_base = output_dir / f"{mode}_locust"
+    
+    environment = os.environ.copy()
+    
+    environment.update({
+        "NO_PROXY": "127.0.0.1,localhost",
+        "no_proxy": "127.0.0.1,localhost",
+        "CACHELAB_CONTINUOUS": "true",
+        "CACHELAB_WARMUP_SECONDS": str(warmup),
+        "CACHELAB_MEASURE_SECONDS": str(duration),
+        "CACHELAB_PHASE_RESULT": str(phase_path.resolve()),
+        "CACHELAB_LOCUST_FINAL_STATS": str(final_path.resolve()),
+        "CACHELAB_BACKEND_URL": BASE_URL,
+    })
+    
+    with httpx.Client(
+        base_url=BASE_URL,
+        timeout=25.0,
+        trust_env=False,
+    ) as client:
+        response = client.get("/api/resources/stats")
+        response.raise_for_status()
+        initial = response.json()
+        
+        if any(value != 0 for value in initial.values()):
+            raise RuntimeError(f"Non-zero initial counters: {initial}")
+        
+        response = client.post("/api/experiment/wait-idle")
+        response.raise_for_status()
+        
+        if response.json()["prefetch_enabled"] != expected_ml:
+            raise RuntimeError(f"Unexpected backend mode: {mode}")
+        
+    command = [
+        sys.executable,
+        "-m", "locust",
+        "-f", "load/locust_http.py",
+        "--headless",
+        "--only-summary",
+        "--host", BASE_URL,
+        "--users", str(users),
+        "--spawn-rate", str(users),
+        "--stop-timeout", "10s",
+        "--exit-code-on-error", "2",
+        "--csv", str(csv_base),
+    ]
+    
+    print(
+        f"Continuous Locust: {mode}, "
+        f"warmup={warmup}s, "
+        f"measurement={duration}s, users={users}",
+        flush=True,
+    )
+    
+    try:
+        process = subprocess.run(
+            command,
+            cwd=SERVER_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=warmup + duration + 120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log_path.write_text(
+            f"Locust timeout: {exc}",
+            encoding="utf-8",
+        )
+        raise RuntimeError(f"Continuous Locust timed out: {mode}") from exc
+    
+    log_path.write_text(
+        process.stdout + "\n" + process.stderr,
+        encoding="utf-8",
+    )
+    
+    if process.returncode != 0:
+        raise RuntimeError(f"Continuous Locust failed: {log_path}")
+    
+    if not phase_path.is_file():
+        raise RuntimeError(f"Phase results not found: {phase_path}")
+    
+    phases = json.loads(
+        phase_path.read_text(encoding="utf-8")
+    )
+    
+    if phases.get("status") != "completed":
+        raise RuntimeError(f"Invalid phase result: {phases}")
+    
+    warmup_stats = phases["warmup_stats"]
+    measurement_stats = phases["measurement_stats"]
+    
+    before = phases["counters_at_measurement_start"]
+    after = phases["counters_at_measurement_end"]
+    
+    warmup_requests = before["hits"] + before["misses"]
+    
+    if warmup_requests != warmup_stats["request_count"]:
+        raise RuntimeError(
+            "Warmup request count mismatch: "
+            f"backend={warmup_requests}, "
+            f"Locust={warmup_stats['request_count']}"
+        )
+    
+    if warmup_stats["failure_count"] != 0:
+        raise RuntimeError("Warmup contains HTTP failures")
+    
+    metrics = {
+        name: after[name] - before[name]
+        for name in after
+    }
+    
+    request_count = measurement_stats["request_count"]
+    backend_requests = metrics["hits"] + metrics["misses"]
+    
+    if request_count == 0:
+        raise RuntimeError("No measurement requests")
+    
+    if measurement_stats["failure_count"] != 0:
+        raise RuntimeError("Measurement contains HTTP failures")
+    
+    if backend_requests != request_count:
+        raise RuntimeError(
+            "Measurement request count mismatch: "
+            f"backend={backend_requests}, "
+            f"Locust={request_count}"
+        )
+    
+    if metrics["origin_requests"] != metrics["hits"] + metrics["misses"]:
+        raise RuntimeError("Origin counters are inconsistent")
+    
+    if not expected_ml and metrics["prefetch_requests"] != 0:
+        raise RuntimeError("Unexpected prefetch in LRU mode")
+    
+    if not final_path.is_file():
+        raise RuntimeError(f"Final Locust stats not found: {final_path}")
+    
+    final_stats = json.loads(
+        final_path.read_text(encoding="utf-8")
+    )
+    
+    if final_stats["request_count"] != request_count:
+        raise RuntimeError(f"Final Locust count differs from phase result")
+    
+    summary = {
+        "mode": mode,
+        "workload": "locust",
+        "execution": "continuous",
+        "users": users,
+        "warmup_seconds": warmup,
+        "duration_seconds": duration,
+        "warmup_stats": warmup_stats,
+        "sent_requests": request_count,
+        "failure_count": measurement_stats["failure_count"],
+        "rps": measurement_stats["rps"],
+        "hit_rate": metrics["hits"] / request_count,
+        "metrics": metrics,
+        "latency_ms": measurement_stats["latency_ms"],
+        "percentile_method": "locust_approximate",
+        "counters_at_measurement_start": before,
+        "counters_at_measurement_end": after,
+        "phase_result_json": str(phase_path.resolve()),
+        "final_stats_json": str(final_path.resolve()),
+    }
+    
+    summary_path.write_text(
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8"
+    )
+    
+    print(
+        f"{mode}: "
+        f"warmup_requests={warmup_requests}, "
+        f"measurement_requests={request_count}, "
+        f"RPS={summary['rps']:.2f}, "
+        f"hit rate={summary['hit_rate']:.2f}, "
+        f"p95={summary['latency_ms']['p95']:.2f} ms",
+        flush=True
+    )
+    
+    return {
+        "mode": mode,
+        "log": str(log_path.resolve()),
+        "summary_json": str(summary_path.resolve()),
+        "phase_result_json": str(phase_path.resolve()),
+        "final_stats_json": str(final_path.resolve()),
+        "results": summary,
+        "exit_code": process.returncode,
+    }
     
     
 def find_sets(value, path="manifest"):
@@ -449,6 +752,19 @@ def main() -> None:
         help="Locust duration in seconds"
     )
     
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=0,
+        help="Warmup duration in seconds"
+    )
+    
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Use continuous Locust warmup and measurement"
+    )
+    
     args = parser.parse_args()
     
     if args.repeats <= 0:
@@ -460,6 +776,12 @@ def main() -> None:
     if args.duration <= 0:
         parser.error("--duration must be positive")
     
+    if args.warmup <= 0:
+        parser.error("--warmup must be non-negative")
+    
+    if args.continuous and args.workload != "locust":
+        parser.error("--continuous requires --workload locust")
+
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     output_dir = SERVER_DIR / "results" / "pairs" / run_id
@@ -467,11 +789,11 @@ def main() -> None:
     
     manifest = {
         "run_id": run_id,
-        "experiment_type": {
+        "experiment_type": (
             "concurrent_http_locust"
             if args.workload == "locust"
             else "sequential_http_smoke"
-        },
+        ),
         "workload_config": {
             "workload": args.workload,
             "users": (
@@ -481,6 +803,16 @@ def main() -> None:
             ),
             "duration_seconds": (
                 args.duration
+                if args.workload == "locust"
+                else None
+            ),
+            "warmup_seconds": (
+                args.warmup
+                if args.workload == "locust"
+                else None
+            ),
+            "continuous": (
+                args.continuous
                 if args.workload == "locust"
                 else None
             )
@@ -514,12 +846,21 @@ def main() -> None:
 
                 prepare_backend(mode)
                 
-                if args.workload == "locust":
+                if args.workload == "locust" and args.continuous:
+                    result = execute_locust_continuous(
+                        mode=mode,
+                        output_dir=pair_dir,
+                        users=args.users,
+                        duration=args.duration,
+                        warmup=args.warmup,
+                    )
+                elif args.workload == "locust":
                     result = execute_locust_workload(
                         mode=mode,
                         output_dir=output_dir,
                         users=args.users,
                         duration=args.duration,
+                        warmup=args.warmup,
                     )
                 else:
                     result = execute_workload(
