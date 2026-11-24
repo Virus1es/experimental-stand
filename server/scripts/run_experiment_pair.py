@@ -498,14 +498,19 @@ def execute_locust_continuous(
     users: int,
     duration: int,
     warmup: int,
+    fixed_count: bool = False,
+    warmup_requests: int | None = None,
+    measurement_requests: int | None = None,
+    phase_timeout: int = 120
 ) -> dict:
     """Проводит прогрев и измерение в одном процессе Locust."""
     
-    expected_ml = mode == "locust"
+    expected_ml = mode == "lru-ml"
     
     phase_path = output_dir / f"{mode}_phases.json"
     final_path = output_dir / f"{mode}_locust_final.json"
     summary_path = output_dir / f"{mode}_summary.json"
+    trace_path = output_dir / f"{mode}_request_trace.json"
     log_path = output_dir / f"{mode}.log"
     csv_base = output_dir / f"{mode}_locust"
     
@@ -515,11 +520,17 @@ def execute_locust_continuous(
         "NO_PROXY": "127.0.0.1,localhost",
         "no_proxy": "127.0.0.1,localhost",
         "CACHELAB_CONTINUOUS": "true",
+        "CACHELAB_USERS": str(users),
         "CACHELAB_WARMUP_SECONDS": str(warmup),
         "CACHELAB_MEASURE_SECONDS": str(duration),
         "CACHELAB_PHASE_RESULT": str(phase_path.resolve()),
         "CACHELAB_LOCUST_FINAL_STATS": str(final_path.resolve()),
+        "CACHELAB_TRACE_RESULT": str(trace_path.resolve()),
         "CACHELAB_BACKEND_URL": BASE_URL,
+        "CACHELAB_FIXED_COUNT": "true" if fixed_count else "false",
+        "CACHELAB_WARMUP_REQUESTS": str(warmup_requests if fixed_count else 0),
+        "CACHELAB_MEASUREMENT_REQUESTS": str(measurement_requests if fixed_count else 0),
+        "CACHELAB_PHASE_TIMEOUT_SECONDS": str(phase_timeout),
     })
     
     with httpx.Client(
@@ -561,6 +572,12 @@ def execute_locust_continuous(
         flush=True,
     )
     
+    process_timeout = (
+        2 * phase_timeout + 45
+        if fixed_count
+        else warmup + duration + 120
+    )
+    
     try:
         process = subprocess.run(
             command,
@@ -570,7 +587,7 @@ def execute_locust_continuous(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=warmup + duration + 120,
+            timeout=process_timeout,
         )
     except subprocess.TimeoutExpired as exc:
         log_path.write_text(
@@ -597,18 +614,22 @@ def execute_locust_continuous(
     if phases.get("status") != "completed":
         raise RuntimeError(f"Invalid phase result: {phases}")
     
+    if not trace_path.is_file():
+        raise RuntimeError(f"Request trace not found: {trace_path}")
+    
+    
     warmup_stats = phases["warmup_stats"]
     measurement_stats = phases["measurement_stats"]
     
     before = phases["counters_at_measurement_start"]
     after = phases["counters_at_measurement_end"]
     
-    warmup_requests = before["hits"] + before["misses"]
+    actual_warmup_requests = before["hits"] + before["misses"]
     
-    if warmup_requests != warmup_stats["request_count"]:
+    if actual_warmup_requests != warmup_stats["request_count"]:
         raise RuntimeError(
             "Warmup request count mismatch: "
-            f"backend={warmup_requests}, "
+            f"backend={actual_warmup_requests}, "
             f"Locust={warmup_stats['request_count']}"
         )
     
@@ -635,9 +656,18 @@ def execute_locust_continuous(
             f"backend={backend_requests}, "
             f"Locust={request_count}"
         )
+        
+    origin_requests = metrics["origin_requests"]
     
-    if metrics["origin_requests"] != metrics["hits"] + metrics["misses"]:
-        raise RuntimeError("Origin counters are inconsistent")
+    expected_origin_requests = metrics["misses"] + metrics["prefetch_requests"]
+    
+    if origin_requests != expected_origin_requests:
+        raise RuntimeError(
+            "Origin counters are inconsistent: "
+            f"origin={metrics['origin_requests']}, "
+            f"misses={metrics['misses']}, "
+            f"prefetch={metrics['prefetch_requests']}"
+        )
     
     if not expected_ml and metrics["prefetch_requests"] != 0:
         raise RuntimeError("Unexpected prefetch in LRU mode")
@@ -651,6 +681,47 @@ def execute_locust_continuous(
     
     if final_stats["request_count"] != request_count:
         raise RuntimeError(f"Final Locust count differs from phase result")
+    
+    if fixed_count:
+        if phases.get("execution") != "fixed_count":
+            raise RuntimeError("Locust did not execute fixed-count mode")
+        
+        expected_warmup = users * (warmup_requests or 0)
+        expected_measurement = users * (measurement_requests or 0)
+        
+        if actual_warmup_requests != expected_warmup:
+            raise RuntimeError(
+                "Incorrect warmup request count: "
+                f"expected={expected_warmup}, "
+                f"actual={actual_warmup_requests}"
+            )
+        
+        if request_count != expected_measurement:
+            raise RuntimeError(
+                "Incorrect measurement request count: "
+                f"expected={expected_measurement}, "
+                f"actual={request_count}"
+            )
+        
+        request_trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        
+        for phase_name, expected_per_user in (
+            ("warmup", warmup_requests),
+            ("measurement", measurement_requests)
+        ):
+            user_traces = request_count["phases"][phase_name]["users"]
+            
+            if len(user_traces) != users:
+                raise RuntimeError(f"Unexpected user count in {phase_name}")
+            
+            for user_index in range(users):
+                actual = user_traces[str(user_index)]["request_count"]
+                
+                if actual != expected_per_user:
+                    raise RuntimeError(
+                        f"{phase_name}, user {user_index}: "
+                        f"expected={expected_per_user}, actual={actual}"
+                    )
     
     summary = {
         "mode": mode,
@@ -671,6 +742,7 @@ def execute_locust_continuous(
         "counters_at_measurement_end": after,
         "phase_result_json": str(phase_path.resolve()),
         "final_stats_json": str(final_path.resolve()),
+        "request_trace_json": str(trace_path.resolve()),
     }
     
     summary_path.write_text(
@@ -687,7 +759,7 @@ def execute_locust_continuous(
         f"warmup_requests={warmup_requests}, "
         f"measurement_requests={request_count}, "
         f"RPS={summary['rps']:.2f}, "
-        f"hit rate={summary['hit_rate']:.2f}, "
+        f"hit rate={summary['hit_rate']:.2%}, "
         f"p95={summary['latency_ms']['p95']:.2f} ms",
         flush=True
     )
@@ -698,6 +770,7 @@ def execute_locust_continuous(
         "summary_json": str(summary_path.resolve()),
         "phase_result_json": str(phase_path.resolve()),
         "final_stats_json": str(final_path.resolve()),
+        "request_trace_json": str(trace_path.resolve()),
         "results": summary,
         "exit_code": process.returncode,
     }
@@ -720,6 +793,66 @@ def find_sets(value, path="manifest"):
         for index, item in enumerate(value):
             find_sets(item, f"{path}[{index}]")
     
+def compare_request_traces(lru_path: Path, ml_path: Path) -> dict:
+    """Проверяет идентичность фактической нагрузки"""
+    
+    lru = json.loads(lru_path.read_text(encoding="utf-8"))
+    ml = json.loads(ml_path.read_text(encoding="utf-8"))
+    
+    mismatches = []
+    
+    for field in (
+        "source_trace_length",
+        "source_trace_sha256",
+        "user_count"
+    ):
+        if lru[field] != ml[field]:
+            mismatches.append(
+                f"{field}: LRU={lru[field]}, ML={ml[field]}"
+            )
+    
+    for phase in ("warmup", "measurement"):
+        lru_phase = lru["phases"][phase]
+        ml_phase = ml["phases"][phase]
+        
+        if lru_phase["request_count"] != ml_phase["request_count"]:
+            mismatches.append(
+                f"{phase}: different total request counts"
+            )
+        
+        lru_users = lru_phase["users"]
+        ml_users = ml_phase["users"]
+        
+        all_user_ids = sorted(
+            set(lru_users) | set(ml_users),
+            key=int,
+        )
+        
+        for user_id in all_user_ids:
+            lru_user = lru_users.get(user_id)
+            ml_user = ml_users.get(user_id)
+            
+            if lru_user is None or ml_user is None:
+                mismatches.append(
+                    f"{phase}, user {user_id}: missing user"
+                )
+                continue
+            
+            if (
+                lru_user["request_count"] != ml_user["request_count"] or
+                lru_user["sha256"] != ml_user["sha256"] or
+                lru_user["resource_ids"] != ml_user["resource_ids"]
+            ):
+                mismatches.append(
+                    f"{phase}, user {user_id}: request sequence differ"
+                )
+    
+    return {
+        "matched": len(mismatches) == 0,
+        "mismatches": mismatches,
+        "lru_trace": str(lru_path.resolve()),
+        "ml_trace": str(ml_path.resolve()),
+    }
     
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -765,6 +898,33 @@ def main() -> None:
         help="Use continuous Locust warmup and measurement"
     )
     
+    parser.add_argument(
+        "--fixed-count",
+        action="store_true",
+        help="Use a fixed number of requests per user"
+    )
+    
+    parser.add_argument(
+        "--warmup-requests",
+        type=int,
+        default=None,
+        help="Warmup requests per user in fixed-count mode"
+    )
+    
+    parser.add_argument(
+        "--measurement-requests",
+        type=int,
+        default=None,
+        help="Measurement requests per user in fixed-count mode"
+    )
+    
+    parser.add_argument(
+        "--phase-timeout",
+        type=int,
+        default=120,
+        help="Maximum duration of each phase in seconds"
+    )
+    
     args = parser.parse_args()
     
     if args.repeats <= 0:
@@ -776,11 +936,27 @@ def main() -> None:
     if args.duration <= 0:
         parser.error("--duration must be positive")
     
-    if args.warmup <= 0:
+    if args.warmup < 0:
         parser.error("--warmup must be non-negative")
     
     if args.continuous and args.workload != "locust":
         parser.error("--continuous requires --workload locust")
+        
+    if args.fixed_count and not (args.workload != "locust" and args.continuous):
+        parser.error("--fixed-count requires --workload locust --continuous")
+    
+    if args.phase_timeout:
+        parser.error("--phase-timeout must be positive")
+    
+    if args.fixed_count:
+        if args.warmup_requests is None or args.warmup_requests < 0:
+            parser.error("--warmup-requests must be non-negative")
+        
+        if args.measurement_requests is None or args.measurement_requests <= 0:
+            parser.error("--measurement-requests must be positive")
+    elif args.warmup_requests is not None or args.measurement_requests is not None:
+        parser.error("--warmup-requests and --measurement-requests requires --fixed-count")
+        
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
@@ -857,7 +1033,7 @@ def main() -> None:
                 elif args.workload == "locust":
                     result = execute_locust_workload(
                         mode=mode,
-                        output_dir=output_dir,
+                        output_dir=pair_dir,
                         users=args.users,
                         duration=args.duration,
                         warmup=args.warmup,
@@ -877,6 +1053,22 @@ def main() -> None:
             
             lru = by_mode["lru"]
             ml = by_mode["lru-ml"]
+            
+            if args.workload == "locust" and args.continuous:
+                validation = compare_request_traces(
+                    lru_path=Path(lru["request_trace_json"]),
+                    ml_path=Path(ml["request_trace_json"]),
+                )
+                
+                pair["workload_validation"] = validation
+                
+                if validation["matched"]:
+                    print("Workload validation: MATCHED", flush=True)
+                else:
+                    print("Workload validation: NOT MATCHED", flush=True)
+                    
+                    for mismatch in validation["mismatches"]:
+                        print(f"  - {mismatch}", flush=True)
             
             lru_p95 = lru["latency_ms"]["p95"]
             ml_p95 = ml["latency_ms"]["p95"]
@@ -911,6 +1103,27 @@ def main() -> None:
             "mean_p95_reduction_pct": mean(reductions),
             "pairs_with_improvement": sum(value > 0 for value in reductions)
         }
+        
+        if args.workload == "locust" and args.continuous:
+            matched_pairs = [
+                pair
+                for pair in manifest["pairs"]
+                if pair.get("workload_validation", {}).get("matched", False)
+            ]
+            
+            matched_reductions = [
+                pair["comparison"]["p95_reduction_pct"]
+                for pair in matched_pairs
+                if "comparison" in pair
+            ]
+            
+            manifest["summary"]["matched_workload_pairs"] = len(matched_pairs)
+            
+            manifest["summary"]["mean_p95_reduction_matched_pct"] = (
+                mean(matched_reductions)
+                if matched_reductions
+                else None
+            )
         
         print("\n=== Overall Summary ===")
         print(f"Completed pairs: {len(reductions)}")
