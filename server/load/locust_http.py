@@ -159,7 +159,7 @@ def mark_fixed_completed(phase: str) -> None:
     """Регистрирует завершение одного запроса фазы"""
     
     env_name = (
-        "CAHCELAB_WARMUP_REQUESTS"
+        "CACHELAB_WARMUP_REQUESTS"
         if phase == "warmup"
         else "CACHELAB_MEASUREMENT_REQUESTS"
     )

@@ -565,12 +565,24 @@ def execute_locust_continuous(
         "--csv", str(csv_base),
     ]
     
-    print(
-        f"Continuous Locust: {mode}, "
-        f"warmup={warmup}s, "
-        f"measurement={duration}s, users={users}",
-        flush=True,
-    )
+    if fixed_count:
+        print(
+            f"Fixed-count Locust: {mode}, "
+            f"users={users}",
+            f"warmup={warmup_requests}/user "
+            f"({users * (warmup_requests or 0)} total), "
+            f"measurement={measurement_requests}/user "
+            f"({users * (measurement_requests or 0)} total)",
+            flush=True,
+        )
+    else:
+        print(
+            f"Continuous Locust: {mode}, "
+            f"warmup={warmup}s, "
+            f"measurement={duration}s, " 
+            f"users={users}",
+            flush=True,
+        )
     
     process_timeout = (
         2 * phase_timeout + 45
@@ -709,7 +721,7 @@ def execute_locust_continuous(
             ("warmup", warmup_requests),
             ("measurement", measurement_requests)
         ):
-            user_traces = request_count["phases"][phase_name]["users"]
+            user_traces = request_trace["phases"][phase_name]["users"]
             
             if len(user_traces) != users:
                 raise RuntimeError(f"Unexpected user count in {phase_name}")
@@ -722,6 +734,21 @@ def execute_locust_continuous(
                         f"{phase_name}, user {user_index}: "
                         f"expected={expected_per_user}, actual={actual}"
                     )
+                    
+    phase_elapsed = phases.get("phase_elapsed_seconds")
+    
+    if fixed_count:
+        if not isinstance(phase_elapsed, dict):
+            raise RuntimeError("Phase durations are missing")
+        
+        measurement_elapsed = phase_elapsed["measurement"]
+        
+        if measurement_elapsed is None or measurement_elapsed <= 0:
+            raise RuntimeError("Invalid measurement duration")
+        
+        actual_rps = request_count / measurement_elapsed
+    else:
+        actual_rps = measurement_stats["rps"]
     
     summary = {
         "mode": mode,
@@ -733,7 +760,7 @@ def execute_locust_continuous(
         "warmup_stats": warmup_stats,
         "sent_requests": request_count,
         "failure_count": measurement_stats["failure_count"],
-        "rps": measurement_stats["rps"],
+        "rps": actual_rps,
         "hit_rate": metrics["hits"] / request_count,
         "metrics": metrics,
         "latency_ms": measurement_stats["latency_ms"],
@@ -743,6 +770,10 @@ def execute_locust_continuous(
         "phase_result_json": str(phase_path.resolve()),
         "final_stats_json": str(final_path.resolve()),
         "request_trace_json": str(trace_path.resolve()),
+        "termination": "fixed_count" if fixed_count else "duration",
+        "warmup_requests_per_user": warmup_requests if fixed_count else None,
+        "measurement_requests_per_user": measurement_requests if fixed_count else None,
+        "phase_elapsed_seconds": phase_elapsed,
     }
     
     summary_path.write_text(
@@ -756,7 +787,7 @@ def execute_locust_continuous(
     
     print(
         f"{mode}: "
-        f"warmup_requests={warmup_requests}, "
+        f"warmup_requests={actual_warmup_requests}, "
         f"measurement_requests={request_count}, "
         f"RPS={summary['rps']:.2f}, "
         f"hit rate={summary['hit_rate']:.2%}, "
@@ -942,10 +973,10 @@ def main() -> None:
     if args.continuous and args.workload != "locust":
         parser.error("--continuous requires --workload locust")
         
-    if args.fixed_count and not (args.workload != "locust" and args.continuous):
+    if args.fixed_count and not (args.workload == "locust" and args.continuous):
         parser.error("--fixed-count requires --workload locust --continuous")
     
-    if args.phase_timeout:
+    if args.phase_timeout <= 0:
         parser.error("--phase-timeout must be positive")
     
     if args.fixed_count:
@@ -979,19 +1010,32 @@ def main() -> None:
             ),
             "duration_seconds": (
                 args.duration
-                if args.workload == "locust"
+                if args.workload == "locust" and not args.fixed_count
                 else None
             ),
             "warmup_seconds": (
-                args.warmup
-                if args.workload == "locust"
+                args.warmup 
+                if args.workload == "locust" and not args.fixed_count
                 else None
             ),
             "continuous": (
                 args.continuous
                 if args.workload == "locust"
                 else None
-            )
+            ),
+            "fixed_count": args.fixed_count,
+            "warmup_requests_per_user": ( 
+                args.warmup_requests
+                if args.fixed_count else None
+            ),
+            "measurement_requests_per_user": ( 
+                args.measurement_requests
+                if args.fixed_count else None
+            ),
+            "phase_timeout_seconds": ( 
+                args.phase_timeout
+                if args.fixed_count else None
+            ),
         },
         "requested_repeats": args.repeats,
         "pairs": [],
@@ -1029,6 +1073,10 @@ def main() -> None:
                         users=args.users,
                         duration=args.duration,
                         warmup=args.warmup,
+                        fixed_count=args.fixed_count,
+                        warmup_requests=args.warmup_requests,
+                        measurement_requests=args.measurement_requests,
+                        phase_timeout=args.phase_timeout,
                     )
                 elif args.workload == "locust":
                     result = execute_locust_workload(
