@@ -61,3 +61,29 @@ services:
     
     cpus: 2.0
     mem_limit: 1g
+  
+  locust:
+    image: cache-lab-experiment-backend
+
+    profiles:
+      - load
+    
+    working_dir: /app
+
+    entrypoint:
+      - python
+      - -m
+      - locust
+    
+    environment:
+      CACHELAB_BACKEND_URL: http://backend:8000
+      NO_PROXY: backend,origin,redis,localhost,127.0.0.1
+      no_proxy: backend,origin,redis,localhost,127.0.0.1
+    
+    volumes:
+      - ./server/load:/app/load:ro
+      - ./server/data:/app/data:ro
+      - ./server/results:/app/results
+    
+    cpus: 2.0
+    mem_limit: 1g

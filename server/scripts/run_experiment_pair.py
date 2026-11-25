@@ -10,6 +10,10 @@ import csv
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
+from datetime import timezone
+
+from scripts.experiment_metadata import collect_environment_metadata, collect_docker_images
+from scripts.experiment_setup import ensure_experiment_services, verify_backend_trace
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = SERVER_DIR.parent
@@ -22,6 +26,13 @@ COMPOSE = [
 ]
 
 BASE_URL = "http://127.0.0.1:8000"
+
+def container_path(path: Path) -> str:
+    """Преобразует путь хоста в путь внутри контейнера Locust"""
+    
+    relative_path = path.resolve().relative_to(SERVER_DIR.resolve())
+    
+    return "/app/" + relative_path.as_posix()
 
 def run_compose(*args: str, environment: dict[str, str]) -> None:
     subprocess.run(
@@ -64,6 +75,7 @@ def prepare_backend(mode: str) -> None:
     )
     
     wait_until_ready(mode)
+    verify_backend_trace()
     
 def wait_until_ready(mode: str) -> None:
     """Ожидает готовности backend и проверяет режим"""
@@ -501,7 +513,8 @@ def execute_locust_continuous(
     fixed_count: bool = False,
     warmup_requests: int | None = None,
     measurement_requests: int | None = None,
-    phase_timeout: int = 120
+    phase_timeout: int = 120,
+    locust_runtime: str = "host",
 ) -> dict:
     """Проводит прогрев и измерение в одном процессе Locust."""
     
@@ -533,6 +546,14 @@ def execute_locust_continuous(
         "CACHELAB_PHASE_TIMEOUT_SECONDS": str(phase_timeout),
     })
     
+    if locust_runtime == "docker":
+        environment.update({
+            "CACHELAB_PHASE_RESULT": container_path(phase_path),
+            "CACHELAB_LOCUST_FINAL_STATS": container_path(final_path),
+            "CACHELAB_TRACE_RESULT": container_path(trace_path),
+            "CACHELAB_BACKEND_URL": "http://backend:8000",
+        })
+    
     with httpx.Client(
         base_url=BASE_URL,
         timeout=25.0,
@@ -550,20 +571,68 @@ def execute_locust_continuous(
         
         if response.json()["prefetch_enabled"] != expected_ml:
             raise RuntimeError(f"Unexpected backend mode: {mode}")
-        
-    command = [
-        sys.executable,
-        "-m", "locust",
+    
+    locust_args = [
         "-f", "load/locust_http.py",
         "--headless",
         "--only-summary",
-        "--host", BASE_URL,
+        "--host", environment["CACHELAB_BACKEND_URL"],
         "--users", str(users),
         "--spawn-rate", str(users),
         "--stop-timeout", "10s",
         "--exit-code-on-error", "2",
-        "--csv", str(csv_base),
+        "--csv", (
+            container_path(csv_base)
+            if locust_runtime == "docker"
+            else str(csv_base)
+        ),
     ]
+    
+    if locust_runtime == "docker":
+        container_env_names = (
+            "CACHELAB_CONTINUOUS",
+            "CACHELAB_USERS",
+            "CACHELAB_WARMUP_SECONDS",
+            "CACHELAB_MEASURE_SECONDS",
+            "CACHELAB_PHASE_RESULT",
+            "CACHELAB_LOCUST_FINAL_STATS",
+            "CACHELAB_TRACE_RESULT",
+            "CACHELAB_BACKEND_URL",
+            "CACHELAB_FIXED_COUNT",
+            "CACHELAB_WARMUP_REQUESTS",
+            "CACHELAB_MEASUREMENT_REQUESTS",
+            "CACHELAB_PHASE_TIMEOUT_SECONDS",
+        )
+        
+        container_env_args = []
+        
+        for name in container_env_names:
+            container_env_args.extend([
+                "--env",
+                f"{name}={environment[name]}",
+            ])
+        
+        command = [
+            *COMPOSE,
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            *container_env_args,
+            "locust",
+            *locust_args,
+        ]
+        
+        process_cwd = PROJECT_DIR
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "locust",
+            *locust_args,
+        ]
+        
+        process_cwd = PROJECT_DIR
     
     if fixed_count:
         print(
@@ -593,7 +662,7 @@ def execute_locust_continuous(
     try:
         process = subprocess.run(
             command,
-            cwd=SERVER_DIR,
+            cwd=process_cwd,
             env=environment,
             capture_output=True,
             text=True,
@@ -896,6 +965,13 @@ def main() -> None:
     )
     
     parser.add_argument(
+        "--locust-runtime",
+        choices=("host", "docker"),
+        default="host",
+        help="Locust execution environment"
+    )
+    
+    parser.add_argument(
         "--repeats",
         type=int,
         default=1,
@@ -992,6 +1068,7 @@ def main() -> None:
             "warmup_requests",
             "measurement_requests",
             "phase_timeout",
+            "locust_runtime",
         }
         
         unknown_keys = set(config) - allowed_keys
@@ -1005,6 +1082,13 @@ def main() -> None:
         parser.set_defaults(**config)
     
     args = parser.parse_args()
+    
+    if args.locust_runtime == "docker":
+        if not (args.workload == "locust" and args.continuous):
+            parser.error(
+                "--locust-runtime docker requires "
+                "--workload locust --continuous"
+            )
     
     if args.repeats <= 0:
         parser.error("--repeats must be positive")
@@ -1044,6 +1128,8 @@ def main() -> None:
     
     manifest = {
         "run_id": run_id,
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "environment": None,
         "config_file": (
             str(args.config)
             if args.config is not None
@@ -1061,6 +1147,7 @@ def main() -> None:
         ),
         "workload_config": {
             "workload": args.workload,
+            "locust_runtime": args.locust_runtime,
             "users": (
                 args.users
                 if args.workload == "locust"
@@ -1100,6 +1187,10 @@ def main() -> None:
     }
     
     try:
+        ensure_experiment_services()
+        
+        manifest["environment"] = collect_environment_metadata()
+        
         for pair_index in range(1, args.repeats + 1):
             if pair_index % 2 == 1:
                 order = ("lru", "lru-ml")
@@ -1124,6 +1215,8 @@ def main() -> None:
 
                 prepare_backend(mode)
                 
+                docker_images = collect_docker_images()
+                
                 if args.workload == "locust" and args.continuous:
                     result = execute_locust_continuous(
                         mode=mode,
@@ -1135,6 +1228,7 @@ def main() -> None:
                         warmup_requests=args.warmup_requests,
                         measurement_requests=args.measurement_requests,
                         phase_timeout=args.phase_timeout,
+                        locust_runtime=args.locust_runtime,
                     )
                 elif args.workload == "locust":
                     result = execute_locust_workload(
@@ -1149,6 +1243,8 @@ def main() -> None:
                         mode=mode, 
                         output_dir=pair_dir
                     )
+                
+                result["docker_images"] = docker_images
                 
                 pair["runs"].append(result)
             
@@ -1248,6 +1344,8 @@ def main() -> None:
         raise
     
     finally:
+        manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        
         manifest_path = output_dir / "manifest.json"
         
         find_sets(manifest)
