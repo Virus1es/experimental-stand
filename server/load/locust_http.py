@@ -452,7 +452,7 @@ def run_continuous_phases(environment: Environment) -> None:
                 started = time.monotonic()
                 
                 traffic_allowed.set()
-                fixed_shutdown_gate.set()
+                fixed_measurement_gate.set()
                 
                 if not fixed_phase_complete["measurement"].wait(timeout=phase_timeout):
                     raise TimeoutError("Fixed measurement did not complete")

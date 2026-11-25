@@ -889,6 +889,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to experiment configuration JSON"
+    )
+    
+    parser.add_argument(
         "--repeats",
         type=int,
         default=1,
@@ -956,6 +963,47 @@ def main() -> None:
         help="Maximum duration of each phase in seconds"
     )
     
+    config_args, _ = parser.parse_known_args()
+    
+    config_path = None
+    
+    if config_args.config is not None:
+        config_path = config_args.config
+        
+        if not config_path.is_absolute():
+            config_path = SERVER_DIR / config_path
+        
+        if not config_path.is_file():
+            parser.error(f"Configuration file not found: {config_path}")
+        
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        
+        if not isinstance(config, dict):
+            parser.error("Experiment configuration nust be a JSON object")
+        
+        allowed_keys = {
+            "repeats",
+            "workload",
+            "users",
+            "duration",
+            "warmup",
+            "continuous",
+            "fixed_count",
+            "warmup_requests",
+            "measurement_requests",
+            "phase_timeout",
+        }
+        
+        unknown_keys = set(config) - allowed_keys
+        
+        if unknown_keys:
+            parser.error(
+                "Unknown configuration parameters: "
+                + ", ".join(sorted(unknown_keys))
+            )
+        
+        parser.set_defaults(**config)
+    
     args = parser.parse_args()
     
     if args.repeats <= 0:
@@ -996,6 +1044,16 @@ def main() -> None:
     
     manifest = {
         "run_id": run_id,
+        "config_file": (
+            str(args.config)
+            if args.config is not None
+            else None
+        ),
+        "effective_arguments": {
+            key: value
+            for key, value in vars(args).items()
+            if key != "config"
+        },
         "experiment_type": (
             "concurrent_http_locust"
             if args.workload == "locust"

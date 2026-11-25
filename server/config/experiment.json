@@ -1,0 +1,10 @@
+{
+    "workload": "locust",
+    "continuous": true,
+    "fixed_count": true,
+    "users": 5,
+    "warmup_requests": 13,
+    "measurement_requests": 28,
+    "phase_timeout": 30,
+    "repeats": 1 
+}
