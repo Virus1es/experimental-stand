@@ -94,7 +94,7 @@ def main() -> None:
                 
                 result = execute_locust_continuous(
                     mode="lru",
-                    output_dir=output_dir,
+                    output_dir=run_dir,
                     users=users,
                     duration=int(config.get("duration", 30)),
                     warmup=int(config.get("warmup", 0)),
@@ -118,6 +118,14 @@ def main() -> None:
             
             first = pair["runs"][0]["results"]
             second = pair["runs"][1]["results"]
+            
+            first_trace = Path(first["request_trace_json"])
+            second_trace = Path(second["request_trace_json"])
+            
+            if first_trace.resolve() == second_trace.resolve():
+                raise RuntimeError(
+                    "A/A runs must have different request trace files"
+                )
             
             validation = compare_request_traces(
                 Path(first["request_trace_json"]),

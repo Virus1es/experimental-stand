@@ -1,0 +1,11 @@
+{
+  "workload": "locust",
+  "locust_runtime": "docker",
+  "continuous": true,
+  "fixed_count": true,
+  "users": 20,
+  "warmup_requests": 13,
+  "measurement_requests": 80,
+  "phase_timeout": 90,
+  "repeats": 10
+}
