@@ -23,6 +23,7 @@ METRICS = {
     "origin_requests": "Origin requests",
     "prefetch_requests": "Prefetch requests",
     "prefetch_hits": "Prefetch hits",
+    "origin_per_1000": "Origin requests per 1000 user requests",
 }
 
 def extract_metrics(run: dict) -> dict:
@@ -43,6 +44,7 @@ def extract_metrics(run: dict) -> dict:
         "origin_requests": int(counters["origin_requests"]),
         "prefetch_requests": int(counters["prefetch_requests"]),
         "prefetch_hits": int(counters["prefetch_hits"]),
+        "origin_per_1000": 1000 * counters["origin_requests"] / result["sent_requests"],
     }
 
 def read_manifest(path: Path, experiment: str) -> list[dict]:
@@ -416,34 +418,34 @@ def main() -> None:
             flush=True,
         )
         
-        save_csv(output_dir / "runs.csv", list(run_rows[0]), run_rows)
-        
-        save_csv(output_dir / "paired_effects.csv", list(paired_rows[0]), paired_rows)
-        
-        (output_dir / "analysis_summary.json").write_text(
-            json.dumps(
-                summary,
-                ensure_ascii=False,
-                indent=2,
-                allow_nan=False,
-            ),
-            encoding="utf-8",
-        )
-        
-        for metric in (
-            "p95_ms",
-            "avg_ms",
-            "hit_rate_pct",
-            "origin_requests",
-        ):
-            plot_comparison(experiments, metric, output_dir)
-        
-        plot_p95_differences(experiments, output_dir)
-        
-        if "AA" in experiments:
-            plot_aa(experiments["AA"], output_dir)
-        
-        print(f"\nAnalysis saved to: {output_dir.resolve()}")
+    save_csv(output_dir / "runs.csv", list(run_rows[0]), run_rows)
+    
+    save_csv(output_dir / "paired_effects.csv", list(paired_rows[0]), paired_rows)
+    
+    (output_dir / "analysis_summary.json").write_text(
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+    
+    for metric in (
+        "p95_ms",
+        "avg_ms",
+        "hit_rate_pct",
+        "origin_requests",
+    ):
+        plot_comparison(experiments, metric, output_dir)
+    
+    plot_p95_differences(experiments, output_dir)
+    
+    if "AA" in experiments:
+        plot_aa(experiments["AA"], output_dir)
+    
+    print(f"\nAnalysis saved to: {output_dir.resolve()}")
 
 if __name__ == "__main__":
     main()
